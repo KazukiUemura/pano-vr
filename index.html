@@ -7,6 +7,8 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Pano VR">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <title>Pano Cardboard</title>
 <style>
 :root{--bg:#0d0f0e;--fg:#e9ece8;--mute:#8d958f;--line:#2a2f2c;--acc:#c8d96a;--font:"Hiragino Sans","Noto Sans JP",system-ui,sans-serif}
@@ -77,6 +79,7 @@ body.vr #divider{display:block}
     <button id="vr" class="primary">ゴーグルで見る</button>
   </div>
   <div id="status"></div>
+  <p id="a2hs" hidden>Safariのバーはページ側からは消せません。共有ボタン →「ホーム画面に追加」（「Webアプリとして開く」をオン）で追加し、ホーム画面のアイコンから開くと全画面になります。</p>
 </div></div>
 <div id="hint"></div>
 
@@ -296,6 +299,8 @@ function loop(now){
   }else{ cam.layers.set(1); R.setViewport(0,0,W,H); R.render(scene,cam); }
 }
 
+const standalone = navigator.standalone===true || matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches;
+if(!standalone && /iPhone|iPad|iPod/.test(navigator.userAgent)) $('a2hs').hidden=false;
 showSample();
 resize(); requestAnimationFrame(loop);
 restore();
