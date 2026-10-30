@@ -204,29 +204,63 @@ function sample(){
 
 /* ---------- 奥行き推定（Depth Anything V2 small をブラウザ内で実行） ---------- */
 const Est={
-  pipe:null, loading:null,
+  pipe:null, loading:null, backend:'', T:null,
+  /* 速い順に試す：iPhoneのGPU（WebGPU, 半精度）→ GPU（単精度）→ CPU */
+  /* 一度GPUで失敗すると同じページ内ではCPUも使えなくなるため、使えるかを先に確かめてから選ぶ */
+  _plans:null,
+  async plans(){
+    if(this._plans) return this._plans;
+    const p=[]; let forceCpu=false;
+    try{ forceCpu=localStorage.getItem('depthCpu')==='1'; }catch(e){}
+    if(navigator.gpu && !forceCpu){
+      try{
+        const ad=await navigator.gpu.requestAdapter();
+        if(ad){ p.push({device:'webgpu',dtype:ad.features.has('shader-f16')?'fp16':'fp32',label:'GPU'}); }
+      }catch(e){}
+    }
+    p.push({device:'wasm',dtype:'q8',label:'CPU'});
+    return this._plans=p;
+  },
+  planIdx:0,
   async load(){
     if(this.pipe) return this.pipe;
     if(this.loading) return this.loading;
     this.loading=(async()=>{
-      dstatus.textContent='奥行きAIを準備中…（初回のみ約27MBをダウンロード）';
-      const T=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6');
-      const files={};
-      const p=await T.pipeline('depth-estimation','onnx-community/depth-anything-v2-small',{
-        device:'wasm', dtype:'q8',
-        progress_callback:e=>{
-          if(e.status==='progress' && e.total){ files[e.file]=[e.loaded,e.total];
-            let l=0,t=0; for(const k in files){ l+=files[k][0]; t+=files[k][1]; }
-            dstatus.textContent='奥行きAIをダウンロード中… '+Math.round(l/t*100)+'%'; }
-        }
-      });
-      this.pipe=p; return p;
+      if(!this.T) this.T=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6');
+      const plans=await this.plans();
+      for(; this.planIdx<plans.length; this.planIdx++){
+        const pl=plans[this.planIdx], files={};
+        dstatus.textContent='奥行きAIを準備中（'+pl.label+'）…';
+        try{
+          const p=await this.T.pipeline('depth-estimation','onnx-community/depth-anything-v2-small',{
+            device:pl.device, dtype:pl.dtype,
+            progress_callback:e=>{
+              if(e.status==='progress'&&e.total){ files[e.file]=[e.loaded,e.total];
+                let l=0,t=0; for(const k in files){ l+=files[k][0]; t+=files[k][1]; }
+                dstatus.textContent='奥行きAIをダウンロード中（初回のみ）… '+Math.round(l/t*100)+'%'; }
+            }
+          });
+          this.pipe=p; this.backend=pl.label; return p;
+        }catch(e){ console.warn('depth backend failed',pl,e); if(pl.device==='webgpu'){ try{localStorage.setItem('depthCpu','1')}catch(_){} } }
+      }
+      throw new Error('no backend');
     })();
     try{ return await this.loading; }catch(e){ this.loading=null; throw e; }
   },
+  async infer(url){
+    for(;;){
+      const pipe=await this.load();
+      try{ return await pipe(url); }
+      catch(e){
+        console.warn('inference failed on',this.backend,e);
+        if(this.backend==='GPU'){ try{localStorage.setItem('depthCpu','1')}catch(_){} dstatus.textContent='GPUで推定できなかったため、次に開いたときからCPUで推定します'; }
+        if(this.planIdx>=(await this.plans()).length-1) throw e;
+        this.planIdx++; this.pipe=null; this.loading=null;
+      }
+    }
+  },
   /* 継ぎ目対策：左右を回り込ませて余白を付けてから推定し、元の範囲を切り出す */
   async run(img){
-    const pipe=await this.load();
     const W=1036, H=518, pad=Math.round(W*.125);
     const c=document.createElement('canvas'); c.width=W+pad*2; c.height=H;
     const g=c.getContext('2d');
@@ -235,8 +269,8 @@ const Est={
     g.drawImage(g2,W-pad,0,pad,H,0,0,pad,H);
     g.drawImage(g2,0,0,pad,H,pad+W,0,pad,H);
     const url=await new Promise(r=>c.toBlob(b=>r(URL.createObjectURL(b)),'image/jpeg',.92));
-    dstatus.textContent='奥行きを推定中…';
-    const out=await pipe(url); URL.revokeObjectURL(url);
+    dstatus.textContent='奥行きを推定中（'+(this.backend||'準備中')+'）…';
+    const out=await this.infer(url); URL.revokeObjectURL(url);
     const dc=out.depth.toCanvas();
     const sx=dc.width/c.width;
     const o=document.createElement('canvas'); o.width=W; o.height=H;
@@ -275,6 +309,7 @@ async function show(i,withFade){
     if(it.depthSrc){ setDepth(await loadImg(it.depthSrc)); depthAnim=1; } else { setDepth(null); }
     status.textContent=(idx+1)+' / '+items.length+'　'+it.name+(Math.abs(img.width/img.height-2)>.05?'（2:1でないため歪みます）':'');
     if(!it.depthSrc) estimate(it,img,tok); else dstatus.textContent=it.depthKind==='file'?'用意された深度マップを使用中':'推定済みの奥行きを使用中';
+    queueRest();
     if(items.length>1) loadImg(items[(idx+1)%items.length].src).catch(()=>{});
   }catch(e){ status.textContent=it.name+' を読み込めませんでした'; }
   fade.classList.remove('on'); busy=false;
@@ -289,13 +324,25 @@ function estimate(it,img,tok){
       const blob=await new Promise(r=>dc.toBlob(r,'image/png'));
       it.depthSrc=URL.createObjectURL(blob); it.depthKind='est';
       if(it.id!=null){ const rec=await DB.get(it.id); if(rec){ rec.depth=blob; rec.depthKind='est'; await DB.put(rec); } }
-      dstatus.textContent='奥行きを推定しました（'+((performance.now()-t0)/1000).toFixed(1)+'秒）';
+      const left=items.filter(x=>!x.depthSrc).length;
+      dstatus.textContent='奥行きを推定しました（'+Est.backend+'・'+((performance.now()-t0)/1000).toFixed(1)+'秒）'+(left?'　残り'+left+'枚を裏で処理中':'');
       if(items[idx]===it){ setDepth(await loadImg(it.depthSrc)); depthAnim=0; }
       renderList();
     }catch(e){
       console.error(e);
       dstatus.textContent='奥行きを推定できませんでした（通信環境を確認するか、深度マップを用意してください）';
     }
+  });
+}
+/* 見ていない画像も裏で順に推定しておく（表示中の画像を優先） */
+let restQueued=new Set();
+function queueRest(){
+  items.forEach(it=>{
+    if(it.depthSrc||restQueued.has(it)) return; restQueued.add(it);
+    estQueue=estQueue.then(async()=>{
+      if(it.depthSrc||!items.includes(it)) return;
+      try{ await new Promise(r=>setTimeout(r,50)); estimate(it,await loadImg(it.src),0); }catch(e){}
+    });
   });
 }
 function next(){ if(items.length<2||busy) return;
