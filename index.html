@@ -41,12 +41,13 @@ body.vr #divider{display:block}
 <div id="prog"></div>
 <div id="ui"><div id="panel">
   <h1>Pano Cardboard</h1>
-  <p>360°パノラマ（2:1）を複数読み込んで切り替えます。見ている間は<b>タップで次の画像</b>、<b>長押しでこのメニュー</b>。</p>
+  <p>360°パノラマ（2:1）を複数追加して切り替えます。追加した画像はこの端末だけに保存され、次に開いたときも残ります。見ている間は<b>タップで次の画像</b>、<b>長押しでこのメニュー</b>。</p>
 
   <div class="row">
-    <label class="btn" for="file">画像を選ぶ（複数可）</label>
+    <label class="btn" for="file">画像を追加（複数可）</label>
     <input id="file" type="file" accept="image/*" multiple>
-    <button id="reload" class="sm">panosフォルダを読み込む</button>
+    <button id="delone" class="sm">表示中を削除</button>
+    <button id="clear" class="sm">すべて削除</button>
   </div>
   <div id="list"></div>
 
@@ -81,8 +82,18 @@ body.vr #divider{display:block}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 (function(){
-const REPO = {owner:'KazukiUemura', name:'pano-vr', dir:'panos'};
-const IMG_RE = /\.(jpe?g|png|webp)$/i;
+/* ---------- 端末内保存（IndexedDB） ---------- */
+const DB={
+  db:null,
+  open(){ return new Promise((res)=>{ try{ const r=indexedDB.open('pano-cardboard',1);
+    r.onupgradeneeded=()=>r.result.createObjectStore('imgs',{keyPath:'id',autoIncrement:true});
+    r.onsuccess=()=>{this.db=r.result;res(true)}; r.onerror=()=>res(false); }catch(e){res(false)} }); },
+  tx(mode){ return this.db.transaction('imgs',mode).objectStore('imgs'); },
+  all(){ return new Promise(res=>{ if(!this.db) return res([]); try{ const r=this.tx('readonly').getAll(); r.onsuccess=()=>res(r.result||[]); r.onerror=()=>res([]); }catch(e){res([])} }); },
+  add(rec){ return new Promise(res=>{ if(!this.db) return res(null); try{ const r=this.tx('readwrite').add(rec); r.onsuccess=()=>res(r.result); r.onerror=()=>res(null); }catch(e){res(null)} }); },
+  del(id){ return new Promise(res=>{ if(!this.db) return res(); try{ const r=this.tx('readwrite').delete(id); r.onsuccess=r.onerror=()=>res(); }catch(e){res()} }); },
+  clear(){ return new Promise(res=>{ if(!this.db) return res(); try{ const r=this.tx('readwrite').clear(); r.onsuccess=r.onerror=()=>res(); }catch(e){res()} }); }
+};
 
 const R = new THREE.WebGLRenderer({antialias:true});
 R.setPixelRatio(Math.min(devicePixelRatio,2));
@@ -121,17 +132,17 @@ function sample(){
   g.fillStyle='#c8d96a'; g.font='600 64px sans-serif'; g.textAlign='center';
   [['北',0],['東',512],['南',1024],['西',1536],['北',2048]].forEach(([t,x])=>g.fillText(t,x,470));
   g.fillStyle='rgba(255,255,255,.6)'; g.font='32px sans-serif';
-  g.fillText('サンプル：panosフォルダに画像を入れるか、画像を選んでください',1024,620);
+  g.fillText('サンプル：「画像を追加」から自分のパノラマを選んでください',1024,620);
   return c;
 }
 
 /* ---------- プレイリスト ---------- */
-let items=[];   // {name, src}
+let items=[];   // {id, name, src}
 let idx=0;
 const cache=new Map();
 function loadImg(src){
   if(cache.has(src)) return cache.get(src);
-  const p=new Promise((res,rej)=>{ const im=new Image(); im.crossOrigin='anonymous'; im.onload=()=>res(im); im.onerror=rej; im.src=src; });
+  const p=new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=src; });
   cache.set(src,p); p.catch(()=>cache.delete(src)); return p;
 }
 function renderList(){
@@ -162,29 +173,36 @@ function next(){ if(items.length<2||busy) return;
   show(n,true);
 }
 
-async function loadRepoFolder(){
-  status.textContent='panosフォルダを確認中…';
-  let names=[];
-  try{
-    const r=await fetch(`https://api.github.com/repos/${REPO.owner}/${REPO.name}/contents/${REPO.dir}`,{cache:'no-store'});
-    if(r.ok){ const j=await r.json(); names=j.filter(f=>f.type==='file'&&IMG_RE.test(f.name)).map(f=>f.name); }
-  }catch(e){}
-  if(!names.length){
-    try{ const r=await fetch(REPO.dir+'/list.json',{cache:'no-store'}); if(r.ok) names=(await r.json()).filter(n=>IMG_RE.test(n)); }catch(e){}
-  }
-  names.sort((a,b)=>a.localeCompare(b,'ja',{numeric:true}));
-  if(!names.length){ status.textContent='panosフォルダに画像がありません（サンプルを表示中）'; return false; }
-  items=names.map(n=>({name:n, src:REPO.dir+'/'+encodeURIComponent(n)}));
-  await show(0); return true;
+function showSample(){ items=[]; idx=0; current=sample(); applyTexture(current); status.textContent='サンプルを表示中'; renderList(); }
+async function restore(){
+  const ok=await DB.open(); const recs=await DB.all();
+  if(!recs.length){ if(!ok) status.textContent='この端末では保存が使えません（開き直すと選び直しになります）'; return; }
+  items=recs.map(r=>({id:r.id, name:r.name, src:URL.createObjectURL(r.blob)}));
+  await show(0);
 }
-
-$('file').addEventListener('change',e=>{
-  const fs=[...e.target.files].filter(f=>f.type.startsWith('image/')); if(!fs.length) return;
-  items.forEach(it=>{ if(it.src.startsWith('blob:')) URL.revokeObjectURL(it.src); });
-  items=fs.map(f=>({name:f.name, src:URL.createObjectURL(f)}));
-  show(0);
+$('file').addEventListener('change',async e=>{
+  const fs=[...e.target.files].filter(f=>f.type.startsWith('image/')); e.target.value=''; if(!fs.length) return;
+  const start=items.length; let failed=0;
+  for(const f of fs){
+    const id=await DB.add({name:f.name, blob:f, added:Date.now()}); if(id===null) failed++;
+    items.push({id, name:f.name, src:URL.createObjectURL(f)});
+  }
+  await show(start);
+  if(failed) status.textContent+='（'+failed+'枚は保存できませんでした。容量を確認してください）';
 });
-$('reload').addEventListener('click',loadRepoFolder);
+$('delone').addEventListener('click',async ()=>{
+  if(!items.length) return; const it=items[idx];
+  if(it.id!=null) await DB.del(it.id); URL.revokeObjectURL(it.src); cache.delete(it.src);
+  items.splice(idx,1);
+  if(items.length) show(Math.min(idx,items.length-1)); else showSample();
+});
+let clearArmed=false;
+$('clear').addEventListener('click',async ()=>{
+  if(!items.length) return;
+  if(!clearArmed){ clearArmed=true; $('clear').textContent='もう一度押すと全削除'; setTimeout(()=>{clearArmed=false;$('clear').textContent='すべて削除'},3000); return; }
+  clearArmed=false; $('clear').textContent='すべて削除';
+  await DB.clear(); items.forEach(it=>URL.revokeObjectURL(it.src)); cache.clear(); showSample();
+});
 $('layout').addEventListener('change',e=>{ layout=e.target.value; if(current) applyTexture(current); });
 $('interval').addEventListener('change',restartTimer);
 
@@ -277,9 +295,9 @@ function loop(now){
   }else{ cam.layers.set(1); R.setViewport(0,0,W,H); R.render(scene,cam); }
 }
 
-current=sample(); applyTexture(current); status.textContent='サンプルを表示中';
+showSample();
 resize(); requestAnimationFrame(loop);
-loadRepoFolder();
+restore();
 })();
 </script>
 </body>
