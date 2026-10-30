@@ -44,7 +44,7 @@ body.vr #divider{display:block}
 <div id="prog"></div>
 <div id="ui"><div id="panel">
   <h1>Pano Cardboard</h1>
-  <p>360°パノラマ（2:1）を複数追加して切り替えます。追加した画像はこの端末だけに保存され、次に開いたときも残ります。見ている間は<b>タップで次の画像</b>、<b>長押しでこのメニュー</b>。</p>
+  <p>360°パノラマ（2:1）を複数追加して切り替えます。追加した画像はこの端末だけに保存され、次に開いたときも残ります。ゴーグル中は<b>下を向くと操作メニュー</b>が出て、ボタンを見つめると選べます（前へ・次へ・自動切替・終了）。手で操作するときはタップで次へ、長押しでこのメニュー。</p>
 
   <div class="row">
     <label class="btn" for="file">画像を追加（複数可）</label>
@@ -177,6 +177,8 @@ function next(){ if(items.length<2||busy) return;
   show(n,true);
 }
 
+function prev(){ if(items.length<2||busy) return; show(idx-1,true); }
+
 function showSample(){ items=[]; idx=0; current=sample(); applyTexture(current); status.textContent='サンプルを表示中'; renderList(); }
 async function restore(){
   const ok=await DB.open(); const recs=await DB.all();
@@ -214,7 +216,7 @@ $('interval').addEventListener('change',restartTimer);
 let timerStart=0, timerLen=0;
 function restartTimer(){ timerLen=+$('interval').value*1000; timerStart=performance.now(); }
 function tickTimer(now){
-  const running = timerLen>0 && items.length>1 && panel.hidden && !busy;
+  const running = timerLen>0 && items.length>1 && panel.hidden && !busy && !gaze.visible;
   if(!running){ prog.style.width='0'; if(!panel.hidden) timerStart=now; return; }
   const t=(now-timerStart)/timerLen;
   prog.style.width=Math.min(1,t)*100+'%';
@@ -241,7 +243,7 @@ let vr=false;
 function startView(){ panel.hidden=true; restartTimer(); resize(); }
 $('vr').addEventListener('click', async ()=>{
   await enableGyro(); vr=true; document.body.classList.add('vr');
-  hint.textContent=items.length>1?'タップで次へ・長押しでメニュー':'長押しでメニュー'; startView();
+  hint.textContent='下を向くと操作メニュー・タップで次へ'; startView();
 });
 $('look').addEventListener('click', ()=>{
   useGyro=false; vr=false; document.body.classList.remove('vr');
@@ -287,9 +289,101 @@ function resize(){
 addEventListener('resize',resize);
 addEventListener('orientationchange',()=>setTimeout(resize,200));
 
+/* ---------- 視線メニュー（ゴーグル中に下を向くと出る） ---------- */
+const gaze=(()=>{
+  scene.add(cam);
+  const both=o=>{ o.layers.enable(1); o.layers.enable(2); return o; };
+  const group=new THREE.Group(); group.visible=false; scene.add(group);
+  const DIST=3, PITCH=-50, SHOW_BELOW=-35, HIDE_ABOVE=-18, DWELL=1300;
+  const INTERVALS=[0,10,15,30,60];
+
+  function makeTex(label, sub, on){
+    const c=document.createElement('canvas'); c.width=256; c.height=256; const g=c.getContext('2d');
+    g.fillStyle=on?'rgba(200,217,106,.95)':'rgba(13,15,14,.82)';
+    g.beginPath(); g.roundRect ? g.roundRect(8,8,240,240,36) : g.rect(8,8,240,240); g.fill();
+    g.lineWidth=6; g.strokeStyle=on?'#c8d96a':'rgba(233,236,232,.35)'; g.stroke();
+    g.fillStyle=on?'#111':'#e9ece8'; g.textAlign='center'; g.textBaseline='middle';
+    g.font='600 88px "Hiragino Sans",sans-serif'; g.fillText(label,128,sub?100:128);
+    if(sub){ g.font='600 46px "Hiragino Sans",sans-serif'; g.fillText(sub,128,192); }
+    const t=new THREE.CanvasTexture(c); t.minFilter=THREE.LinearFilter; return t;
+  }
+  const btns=[];
+  function addBtn(key,x,draw,act){
+    const m=both(new THREE.Mesh(new THREE.PlaneGeometry(.62,.62), new THREE.MeshBasicMaterial({transparent:true,depthTest:false})));
+    m.renderOrder=10; m.position.x=x; m.userData={key,draw,act,hover:false};
+    group.add(m); btns.push(m); paint(m); return m;
+  }
+  function paint(m){ const [l,s]=m.userData.draw(); if(m.material.map) m.material.map.dispose(); m.material.map=makeTex(l,s,m.userData.hover); m.material.needsUpdate=true; }
+  const autoLabel=()=>{ const v=+$('interval').value; return ['自動', v?v+'秒':'オフ']; };
+  addBtn('prev',-1.05,()=>['◀','前へ'],()=>prev());
+  addBtn('next',-0.35,()=>['▶','次へ'],()=>next());
+  addBtn('auto', 0.35,autoLabel,()=>{
+    const cur=+$('interval').value, i=INTERVALS.indexOf(cur);
+    $('interval').value=String(INTERVALS[(i+1)%INTERVALS.length]); restartTimer();
+  });
+  addBtn('exit', 1.05,()=>['✕','終了'],()=>openMenu());
+
+  /* 表示中の番号 */
+  const capC=document.createElement('canvas'); capC.width=512; capC.height=64;
+  const capT=new THREE.CanvasTexture(capC);
+  const cap=both(new THREE.Mesh(new THREE.PlaneGeometry(1.6,.2), new THREE.MeshBasicMaterial({map:capT,transparent:true,depthTest:false})));
+  cap.position.y=.48; cap.renderOrder=10; group.add(cap);
+  let capText='';
+  function paintCap(){
+    const t=items.length?(idx+1)+' / '+items.length+'　見つめて選択':'見つめて選択';
+    if(t===capText) return; capText=t;
+    const g=capC.getContext('2d'); g.clearRect(0,0,512,64);
+    g.fillStyle='rgba(233,236,232,.85)'; g.font='600 40px "Hiragino Sans",sans-serif'; g.textAlign='center'; g.textBaseline='middle';
+    g.fillText(t,256,32); capT.needsUpdate=true;
+  }
+
+  /* 照準と進捗リング（カメラに固定） */
+  const dot=both(new THREE.Mesh(new THREE.RingGeometry(.012,.022,24), new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:.8,depthTest:false})));
+  dot.position.z=-1.5; dot.renderOrder=20; cam.add(dot);
+  const ringMat=new THREE.MeshBasicMaterial({color:0xc8d96a,depthTest:false,side:THREE.DoubleSide});
+  const ring=both(new THREE.Mesh(new THREE.BufferGeometry(), ringMat));
+  ring.position.z=-1.5; ring.renderOrder=21; cam.add(ring);
+  let ringP=-1;
+  function setRing(p){
+    if(Math.abs(p-ringP)<.01) return; ringP=p; ring.geometry.dispose();
+    ring.geometry=p>0?new THREE.RingGeometry(.03,.045,32,1,Math.PI/2,-p*Math.PI*2):new THREE.BufferGeometry();
+  }
+
+  const ray=new THREE.Raycaster(); ray.layers.enableAll();
+  const dir=new THREE.Vector3(), center=new THREE.Vector2(0,0);
+  let target=null, since=0, fired=false;
+  const api={visible:false, update(now){
+    const active=vr && panel.hidden;
+    dot.visible=active && api.visible;
+    if(!active){ if(api.visible){ api.visible=group.visible=false; } setRing(0); return; }
+    cam.getWorldDirection(dir);
+    const pitch=THREE.MathUtils.radToDeg(Math.asin(dir.y));
+    if(!api.visible && pitch<SHOW_BELOW){
+      const yaw=Math.atan2(dir.x,-dir.z), p=THREE.MathUtils.degToRad(PITCH);
+      group.position.set(Math.sin(yaw)*Math.cos(p)*DIST, Math.sin(p)*DIST, -Math.cos(yaw)*Math.cos(p)*DIST);
+      group.lookAt(0,0,0);
+      api.visible=group.visible=true; btns.forEach(paint);
+    }else if(api.visible && pitch>HIDE_ABOVE){ api.visible=group.visible=false; target=null; setRing(0); return; }
+    if(!api.visible) return;
+    paintCap();
+    ray.setFromCamera(center,cam);
+    const hit=ray.intersectObjects(btns,false)[0];
+    const h=hit?hit.object:null;
+    if(h!==target){
+      if(target){ target.userData.hover=false; paint(target); }
+      target=h; since=now; fired=false;
+      if(h){ h.userData.hover=true; paint(h); }
+    }
+    if(!target||fired){ setRing(0); return; }
+    const t=(now-since)/DWELL; setRing(Math.min(1,t));
+    if(t>=1){ fired=true; setRing(0); target.userData.act(); btns.forEach(paint); }
+  }};
+  return api;
+})();
+
 function loop(now){
   requestAnimationFrame(loop);
-  tickTimer(now); updateCamera();
+  tickTimer(now); updateCamera(); cam.updateMatrixWorld(); gaze.update(now);
   const W=innerWidth,H=innerHeight;
   if(vr){
     R.setScissorTest(true);
