@@ -139,20 +139,20 @@ document.getElementById('vr').addEventListener('click', async ()=>{
   setTimeout(()=>{ if(ori) yawOffset = 0; },300);
   resize();
 });
-document.getElementById('look').addEventListener('click', async ()=>{
-  await enableGyro();
+document.getElementById('look').addEventListener('click', ()=>{
   vr=false; document.body.classList.remove('vr'); panel.hidden=true;
-  hint.textContent='ドラッグ／スマホを動かして見回す・タップでメニュー';
+  useGyro=false;
+  hint.textContent='ドラッグで見回す・タップでメニュー';
   resize();
 });
 
 let downAt=0, moved=false;
-R.domElement.addEventListener('pointerdown',e=>{ drag={x:e.clientX,y:e.clientY,lon,lat}; downAt=Date.now(); moved=false; });
+R.domElement.addEventListener('pointerdown',e=>{ drag={x:e.clientX,y:e.clientY,lon,lat,yaw:yawOffset}; downAt=Date.now(); moved=false; });
 addEventListener('pointermove',e=>{
   if(!drag) return;
   const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
   if(Math.abs(dx)+Math.abs(dy)>6) moved=true;
-  if(useGyro){ yawOffset = drag.lon + dx*.2; }
+  if(useGyro && ori){ yawOffset = drag.yaw + dx*.2; }
   else { lon = drag.lon - dx*.15; lat = Math.max(-85,Math.min(85, drag.lat + dy*.15)); }
 });
 addEventListener('pointerup',()=>{
