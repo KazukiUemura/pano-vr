@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Pano 3D">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<title>Pano Cardboard 3D</title>
+<style>
+:root{--bg:#0c0e12;--fg:#e8ebef;--mute:#8e96a3;--line:#262c36;--acc:#7cc4e8;--font:"Hiragino Sans","Noto Sans JP",system-ui,sans-serif}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:var(--font);overflow:hidden;-webkit-user-select:none;user-select:none;touch-action:none;-webkit-touch-callout:none}
+canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
+#ui{position:fixed;inset:0;display:flex;align-items:flex-end;justify-content:center;padding:calc(16px + env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));pointer-events:none}
+#panel{pointer-events:auto;background:rgba(12,14,18,.9);border:1px solid var(--line);border-radius:14px;padding:16px;width:min(460px,100%);max-height:100%;overflow:auto;display:grid;gap:12px;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
+h1{margin:0;font-size:16px;font-weight:600;letter-spacing:.02em}
+h1 small{font-size:11px;color:var(--acc);font-weight:600;margin-left:6px;border:1px solid var(--acc);border-radius:6px;padding:1px 5px}
+p{margin:0;font-size:12px;line-height:1.6;color:var(--mute)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.lbl{font-size:12px;color:var(--mute)}
+button,label.btn,select{font:inherit;font-size:14px;color:var(--fg);background:#191d25;border:1px solid var(--line);border-radius:10px;padding:10px 14px;cursor:pointer}
+button.primary{background:var(--acc);color:#0a1218;border-color:var(--acc);font-weight:600;flex:1}
+button.sm{padding:8px 12px;font-size:13px}
+input[type=file]{display:none}
+input[type=range]{flex:1;min-width:120px;accent-color:var(--acc)}
+#status,#dstatus{font-size:12px;color:var(--acc);min-height:1em;word-break:break-all}
+#dstatus{color:var(--mute)}
+#list{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px}
+#list button{flex:0 0 auto;font-size:12px;padding:6px 10px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#list button.on{border-color:var(--acc);color:var(--acc)}
+#list button .d{color:var(--acc);margin-left:4px}
+#hint{position:fixed;left:50%;bottom:calc(10px + env(safe-area-inset-bottom));transform:translateX(-50%);font-size:11px;color:rgba(255,255,255,.45);pointer-events:none;white-space:nowrap}
+#divider{position:fixed;top:0;bottom:0;left:50%;width:2px;margin-left:-1px;background:#333;display:none;pointer-events:none}
+body.vr #divider{display:block}
+#fade{position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;transition:opacity .35s}
+#fade.on{opacity:1}
+#prog{position:fixed;left:0;top:0;height:2px;background:var(--acc);width:0;pointer-events:none;opacity:.6}
+details{font-size:12px;color:var(--mute)}
+summary{cursor:pointer}
+</style>
+</head>
+<body>
+<div id="divider"></div>
+<div id="fade"></div>
+<div id="prog"></div>
+<div id="ui"><div id="panel">
+  <h1>Pano Cardboard <small>3D</small></h1>
+  <p>パノラマから奥行きを推定して立体にします。首を傾けると見え方がずれ、左右の目に奥行きがつきます。ゴーグル中は<b>素早く下にうなずくと操作メニュー</b>、ボタンを見つめて選択。</p>
+
+  <div class="row">
+    <label class="btn" for="file">画像を追加（複数可）</label>
+    <input id="file" type="file" accept="image/*" multiple>
+    <button id="delone" class="sm">表示中を削除</button>
+    <button id="clear" class="sm">すべて削除</button>
+  </div>
+  <div id="list"></div>
+
+  <div class="row">
+    <span class="lbl">奥行きの強さ</span>
+    <input id="strength" type="range" min="0" max="2" step="0.05" value="1" aria-label="奥行きの強さ">
+  </div>
+  <div class="row">
+    <span class="lbl">自動切替</span>
+    <select id="interval" aria-label="自動切替の間隔">
+      <option value="0">しない</option>
+      <option value="10">10秒</option>
+      <option value="15" selected>15秒</option>
+      <option value="30">30秒</option>
+      <option value="60">60秒</option>
+    </select>
+    <select id="order" aria-label="順番">
+      <option value="seq">順番に</option>
+      <option value="rand">ランダム</option>
+    </select>
+  </div>
+
+  <details>
+    <summary>深度マップを自分で用意する場合</summary>
+    <p style="margin-top:6px">画像と一緒に「同じ名前＋_depth」の画像（例：room.jpg と room_depth.png）を選ぶと、推定の代わりにそちらを使います。ComfyUIのDepth Anythingなどの出力（白が近い）をそのまま使えます。</p>
+    <div class="row" style="margin-top:8px">
+      <span class="lbl">深度マップの向き</span>
+      <select id="dpol" aria-label="深度マップの向き"><option value="near">白が近い</option><option value="far">白が遠い</option></select>
+      <button id="redo" class="sm">表示中の奥行きを推定し直す</button>
+    </div>
+  </details>
+
+  <div class="row">
+    <button id="look">ドラッグで見る</button>
+    <button id="vr" class="primary">ゴーグルで見る</button>
+  </div>
+  <div id="status"></div>
+  <div id="dstatus"></div>
+  <p id="a2hs" hidden>Safariのバーはページ側からは消せません。共有ボタン →「ホーム画面に追加」（「Webアプリとして開く」をオン）で追加し、ホーム画面のアイコンから開くと全画面になります。</p>
+</div></div>
+<div id="hint"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+const status=$('status'), dstatus=$('dstatus'), hint=$('hint'), panel=$('ui'), fade=$('fade'), prog=$('prog'), listEl=$('list');
+const DEPTH_RE=/[_-](depth|d)$/i;
+const baseName=n=>n.replace(/\.[^.]+$/,'');
+
+/* ---------- 端末内保存（IndexedDB） ---------- */
+const DB={
+  db:null,
+  open(){ return new Promise(res=>{ try{ const r=indexedDB.open('pano-cardboard-3d',1);
+    r.onupgradeneeded=()=>r.result.createObjectStore('imgs',{keyPath:'id',autoIncrement:true});
+    r.onsuccess=()=>{this.db=r.result;res(true)}; r.onerror=()=>res(false); }catch(e){res(false)} }); },
+  st(mode){ return this.db.transaction('imgs',mode).objectStore('imgs'); },
+  req(fn,fallback){ return new Promise(res=>{ if(!this.db) return res(fallback); try{ const r=fn(); r.onsuccess=()=>res(r.result); r.onerror=()=>res(fallback); }catch(e){res(fallback)} }); },
+  all(){ return this.req(()=>this.st('readonly').getAll(),[]); },
+  add(rec){ return this.req(()=>this.st('readwrite').add(rec),null); },
+  put(rec){ return this.req(()=>this.st('readwrite').put(rec),null); },
+  get(id){ return this.req(()=>this.st('readonly').get(id),null); },
+  del(id){ return this.req(()=>this.st('readwrite').delete(id)); },
+  clear(){ return this.req(()=>this.st('readwrite').clear()); }
+};
+
+/* ---------- 描画 ---------- */
+const R=new THREE.WebGLRenderer({antialias:true});
+R.setPixelRatio(Math.min(devicePixelRatio,2));
+R.setSize(innerWidth,innerHeight);
+document.body.prepend(R.domElement);
+const MAXTEX=Math.min(R.capabilities.maxTextureSize,4096);
+
+const scene=new THREE.Scene();
+const cam=new THREE.PerspectiveCamera(75,innerWidth/innerHeight,.03,200);
+scene.add(cam);
+
+/* 深度で変形する球。視差 disp(0..1) → 距離 d = 1/(FAR_INV + k*disp) */
+const FAR=12, NEAR_AT_1=0.8;
+const geo=new THREE.SphereGeometry(1,320,160); geo.scale(-1,1,1);
+const blankDepth=new THREE.DataTexture(new Uint8Array([0,0,0,255]),1,1,THREE.RGBAFormat); blankDepth.needsUpdate=true;
+const uni={ map:{value:null}, dmap:{value:blankDepth}, k:{value:0}, farInv:{value:1/FAR}, invert:{value:0}, mixD:{value:0} };
+const mat=new THREE.ShaderMaterial({
+  uniforms:uni,
+  vertexShader:`
+    uniform sampler2D dmap; uniform float k, farInv, invert, mixD;
+    varying vec2 vUv;
+    void main(){
+      vUv=uv;
+      float disp=texture2D(dmap,uv).r;
+      disp=mix(disp,1.0-disp,invert)*mixD;
+      float d=1.0/(farInv+k*disp);
+      vec3 p=normalize(position)*d;
+      gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.0);
+    }`,
+  fragmentShader:`
+    uniform sampler2D map; varying vec2 vUv;
+    void main(){ gl_FragColor=texture2D(map,vUv); }`,
+  side:THREE.FrontSide
+});
+const sphere=new THREE.Mesh(geo,mat); sphere.frustumCulled=false; scene.add(sphere);
+
+let strength=1, depthOn=0, depthAnim=0;
+function setStrength(s){ strength=s; }
+function applyStrength(){ uni.k.value=strength*(1/NEAR_AT_1-1/FAR); }
+
+let colorTex=null, depthTex=null;
+function toCanvas(img,maxW){
+  const w=Math.min(maxW,img.width||img.naturalWidth), h=Math.round(w*(img.height||img.naturalHeight)/(img.width||img.naturalWidth));
+  const c=document.createElement('canvas'); c.width=w; c.height=h; c.getContext('2d').drawImage(img,0,0,w,h); return c;
+}
+function setColor(img){
+  if(colorTex) colorTex.dispose();
+  const src=(img.width||0)>MAXTEX?toCanvas(img,MAXTEX):img;
+  colorTex=new THREE.Texture(src); colorTex.minFilter=THREE.LinearFilter; colorTex.generateMipmaps=false; colorTex.needsUpdate=true;
+  uni.map.value=colorTex;
+}
+function setDepth(img){
+  if(depthTex){ depthTex.dispose(); depthTex=null; }
+  if(!img){ uni.dmap.value=blankDepth; depthOn=0; return; }
+  /* 軽くぼかして段差の裂け目を目立たなくする */
+  const w=1024, h=512, c=document.createElement('canvas'); c.width=w; c.height=h;
+  const g=c.getContext('2d');
+  try{ g.filter='blur(2px)'; }catch(e){}
+  g.drawImage(img,0,0,w,h);
+  depthTex=new THREE.Texture(c); depthTex.minFilter=THREE.LinearFilter; depthTex.magFilter=THREE.LinearFilter; depthTex.generateMipmaps=false;
+  depthTex.wrapS=THREE.RepeatWrapping; depthTex.needsUpdate=true;
+  uni.dmap.value=depthTex; depthOn=1;
+}
+
+function sample(){
+  const c=document.createElement('canvas'); c.width=2048; c.height=1024;
+  const g=c.getContext('2d');
+  const sky=g.createLinearGradient(0,0,0,512); sky.addColorStop(0,'#14202e'); sky.addColorStop(1,'#8fa7bb');
+  g.fillStyle=sky; g.fillRect(0,0,2048,512); g.fillStyle='#34363a'; g.fillRect(0,512,2048,512);
+  g.strokeStyle='rgba(255,255,255,.18)'; g.lineWidth=2;
+  for(let x=0;x<=2048;x+=128){g.beginPath();g.moveTo(x,0);g.lineTo(x,1024);g.stroke()}
+  for(let y=0;y<=1024;y+=128){g.beginPath();g.moveTo(0,y);g.lineTo(2048,y);g.stroke()}
+  g.fillStyle='#7cc4e8'; g.font='600 64px sans-serif'; g.textAlign='center';
+  [['北',0],['東',512],['南',1024],['西',1536],['北',2048]].forEach(([t,x])=>g.fillText(t,x,470));
+  g.fillStyle='rgba(255,255,255,.6)'; g.font='32px sans-serif';
+  g.fillText('サンプル：「画像を追加」から自分のパノラマを選んでください',1024,620);
+  return c;
+}
+
+/* ---------- 奥行き推定（Depth Anything V2 small をブラウザ内で実行） ---------- */
+const Est={
+  pipe:null, loading:null,
+  async load(){
+    if(this.pipe) return this.pipe;
+    if(this.loading) return this.loading;
+    this.loading=(async()=>{
+      dstatus.textContent='奥行きAIを準備中…（初回のみ約27MBをダウンロード）';
+      const T=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6');
+      const files={};
+      const p=await T.pipeline('depth-estimation','onnx-community/depth-anything-v2-small',{
+        device:'wasm', dtype:'q8',
+        progress_callback:e=>{
+          if(e.status==='progress' && e.total){ files[e.file]=[e.loaded,e.total];
+            let l=0,t=0; for(const k in files){ l+=files[k][0]; t+=files[k][1]; }
+            dstatus.textContent='奥行きAIをダウンロード中… '+Math.round(l/t*100)+'%'; }
+        }
+      });
+      this.pipe=p; return p;
+    })();
+    try{ return await this.loading; }catch(e){ this.loading=null; throw e; }
+  },
+  /* 継ぎ目対策：左右を回り込ませて余白を付けてから推定し、元の範囲を切り出す */
+  async run(img){
+    const pipe=await this.load();
+    const W=1036, H=518, pad=Math.round(W*.125);
+    const c=document.createElement('canvas'); c.width=W+pad*2; c.height=H;
+    const g=c.getContext('2d');
+    const g2=document.createElement('canvas'); g2.width=W; g2.height=H; g2.getContext('2d').drawImage(img,0,0,W,H);
+    g.drawImage(g2,0,0,W,H,pad,0,W,H);
+    g.drawImage(g2,W-pad,0,pad,H,0,0,pad,H);
+    g.drawImage(g2,0,0,pad,H,pad+W,0,pad,H);
+    const url=await new Promise(r=>c.toBlob(b=>r(URL.createObjectURL(b)),'image/jpeg',.92));
+    dstatus.textContent='奥行きを推定中…';
+    const out=await pipe(url); URL.revokeObjectURL(url);
+    const dc=out.depth.toCanvas();
+    const sx=dc.width/c.width;
+    const o=document.createElement('canvas'); o.width=W; o.height=H;
+    o.getContext('2d').drawImage(dc,pad*sx,0,W*sx,dc.height,0,0,W,H);
+    return o;
+  }
+};
+
+/* ---------- プレイリスト ---------- */
+let items=[];   // {id,name,src,depthSrc,depthKind:'file'|'est'|null}
+let idx=0;
+const cache=new Map();
+function loadImg(src){
+  if(cache.has(src)) return cache.get(src);
+  const p=new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=src; });
+  cache.set(src,p); p.catch(()=>cache.delete(src)); return p;
+}
+function renderList(){
+  listEl.innerHTML='';
+  items.forEach((it,i)=>{
+    const b=document.createElement('button'); b.textContent=it.name; if(i===idx) b.className='on';
+    if(it.depthSrc){ const s=document.createElement('span'); s.className='d'; s.textContent=it.depthKind==='file'?'◆':'●'; b.appendChild(s); }
+    b.onclick=()=>show(i); listEl.appendChild(b);
+  });
+}
+let busy=false, showToken=0, estQueue=Promise.resolve();
+async function show(i,withFade){
+  if(!items.length) return;
+  idx=(i+items.length)%items.length;
+  const it=items[idx]; busy=true; const tok=++showToken;
+  try{
+    const imgP=loadImg(it.src);
+    if(withFade){ fade.classList.add('on'); await new Promise(r=>setTimeout(r,350)); }
+    const img=await imgP;
+    setColor(img);
+    if(it.depthSrc){ setDepth(await loadImg(it.depthSrc)); depthAnim=1; } else { setDepth(null); }
+    status.textContent=(idx+1)+' / '+items.length+'　'+it.name+(Math.abs(img.width/img.height-2)>.05?'（2:1でないため歪みます）':'');
+    if(!it.depthSrc) estimate(it,img,tok); else dstatus.textContent=it.depthKind==='file'?'用意された深度マップを使用中':'推定済みの奥行きを使用中';
+    if(items.length>1) loadImg(items[(idx+1)%items.length].src).catch(()=>{});
+  }catch(e){ status.textContent=it.name+' を読み込めませんでした'; }
+  fade.classList.remove('on'); busy=false;
+  renderList(); restartTimer();
+}
+function estimate(it,img,tok){
+  estQueue=estQueue.then(async()=>{
+    if(it.depthSrc) return;
+    try{
+      const t0=performance.now();
+      const dc=await Est.run(img);
+      const blob=await new Promise(r=>dc.toBlob(r,'image/png'));
+      it.depthSrc=URL.createObjectURL(blob); it.depthKind='est';
+      if(it.id!=null){ const rec=await DB.get(it.id); if(rec){ rec.depth=blob; rec.depthKind='est'; await DB.put(rec); } }
+      dstatus.textContent='奥行きを推定しました（'+((performance.now()-t0)/1000).toFixed(1)+'秒）';
+      if(items[idx]===it){ setDepth(await loadImg(it.depthSrc)); depthAnim=0; }
+      renderList();
+    }catch(e){
+      console.error(e);
+      dstatus.textContent='奥行きを推定できませんでした（通信環境を確認するか、深度マップを用意してください）';
+    }
+  });
+}
+function next(){ if(items.length<2||busy) return;
+  const n=$('order').value==='rand'?(idx+1+Math.floor(Math.random()*(items.length-1)))%items.length:idx+1;
+  show(n,true);
+}
+function prev(){ if(items.length<2||busy) return; show(idx-1,true); }
+
+function showSample(){ items=[]; idx=0; setColor(sample()); setDepth(null); status.textContent='サンプルを表示中'; dstatus.textContent=''; renderList(); }
+async function restore(){
+  const ok=await DB.open(); const recs=await DB.all();
+  if(!recs.length){ if(!ok) status.textContent='この端末では保存が使えません（開き直すと選び直しになります）'; return; }
+  items=recs.map(r=>({id:r.id,name:r.name,src:URL.createObjectURL(r.blob),depthSrc:r.depth?URL.createObjectURL(r.depth):null,depthKind:r.depth?(r.depthKind||'file'):null}));
+  await show(0);
+}
+$('file').addEventListener('change',async e=>{
+  const all=[...e.target.files].filter(f=>f.type.startsWith('image/')); e.target.value=''; if(!all.length) return;
+  const depths={}, colors=[];
+  all.forEach(f=>{ const b=baseName(f.name); if(DEPTH_RE.test(b)) depths[b.replace(DEPTH_RE,'').toLowerCase()]=f; else colors.push(f); });
+  const start=items.length; let failed=0, paired=0;
+  for(const f of colors){
+    const d=depths[baseName(f.name).toLowerCase()]||null; if(d) paired++;
+    const id=await DB.add({name:f.name,blob:f,depth:d,depthKind:d?'file':null,added:Date.now()}); if(id===null) failed++;
+    items.push({id,name:f.name,src:URL.createObjectURL(f),depthSrc:d?URL.createObjectURL(d):null,depthKind:d?'file':null});
+  }
+  if(!colors.length){ status.textContent='深度マップだけでは追加できません。元の画像も一緒に選んでください'; return; }
+  await show(start);
+  if(paired) status.textContent+='　（深度マップ '+paired+'枚を組み合わせました）';
+  if(failed) status.textContent+='（'+failed+'枚は保存できませんでした）';
+});
+$('delone').addEventListener('click',async()=>{
+  if(!items.length) return; const it=items[idx];
+  if(it.id!=null) await DB.del(it.id); URL.revokeObjectURL(it.src); cache.delete(it.src);
+  items.splice(idx,1);
+  if(items.length) show(Math.min(idx,items.length-1)); else showSample();
+});
+let clearArmed=false;
+$('clear').addEventListener('click',async()=>{
+  if(!items.length) return;
+  if(!clearArmed){ clearArmed=true; $('clear').textContent='もう一度押すと全削除'; setTimeout(()=>{clearArmed=false;$('clear').textContent='すべて削除'},3000); return; }
+  clearArmed=false; $('clear').textContent='すべて削除';
+  await DB.clear(); items.forEach(it=>URL.revokeObjectURL(it.src)); cache.clear(); showSample();
+});
+$('redo').addEventListener('click',async()=>{
+  const it=items[idx]; if(!it) return;
+  it.depthSrc=null; it.depthKind=null; setDepth(null);
+  if(it.id!=null){ const rec=await DB.get(it.id); if(rec){ rec.depth=null; rec.depthKind=null; await DB.put(rec); } }
+  estimate(it,await loadImg(it.src),showToken); renderList();
+});
+$('strength').addEventListener('input',e=>setStrength(+e.target.value));
+$('dpol').addEventListener('change',e=>{ uni.invert.value=e.target.value==='far'?1:0; try{localStorage.setItem('dpol',e.target.value)}catch(_){} });
+try{ const v=localStorage.getItem('dpol'); if(v){ $('dpol').value=v; uni.invert.value=v==='far'?1:0; } }catch(_){}
+$('interval').addEventListener('change',restartTimer);
+
+/* ---------- 自動切替 ---------- */
+let timerStart=0, timerLen=0;
+function restartTimer(){ timerLen=+$('interval').value*1000; timerStart=performance.now(); }
+function tickTimer(now){
+  const running=timerLen>0 && items.length>1 && panel.hidden && !busy && !gaze.visible;
+  if(!running){ prog.style.width='0'; if(!panel.hidden) timerStart=now; return; }
+  const t=(now-timerStart)/timerLen;
+  prog.style.width=Math.min(1,t)*100+'%';
+  if(t>=1){ timerStart=now; next(); }
+}
+
+/* ---------- 向きと首モデル ---------- */
+let lon=0, lat=0, drag=null, useGyro=false, ori=null, yawOffset=0;
+const zee=new THREE.Vector3(0,0,1), eul=new THREE.Euler(), q0=new THREE.Quaternion(), q1=new THREE.Quaternion(-Math.sqrt(.5),0,0,Math.sqrt(.5));
+const yawQ=new THREE.Quaternion(), up=new THREE.Vector3(0,1,0);
+const screenAngle=()=>(screen.orientation&&screen.orientation.angle)||window.orientation||0;
+addEventListener('deviceorientation',e=>{ if(e.alpha!==null) ori=e; });
+async function enableGyro(){
+  try{
+    if(typeof DeviceOrientationEvent!=='undefined' && typeof DeviceOrientationEvent.requestPermission==='function'){
+      if(await DeviceOrientationEvent.requestPermission()!=='granted'){ status.textContent='モーションセンサーが許可されませんでした'; return false; }
+    }
+    useGyro=true; return true;
+  }catch(e){ status.textContent='ジャイロを使えません（httpsで開いているか確認）'; return false; }
+}
+
+/* 首の付け根を中心に頭が回る：目は付け根から上に7.5cm・前に8cm */
+const NECK=new THREE.Vector3(0,.075,-.08), IPD=.064;
+const headQ=new THREE.Quaternion(), headPos=new THREE.Vector3(), tmpV=new THREE.Vector3();
+function updateHead(){
+  if(useGyro&&ori){
+    eul.set(THREE.MathUtils.degToRad(ori.beta),THREE.MathUtils.degToRad(ori.alpha),-THREE.MathUtils.degToRad(ori.gamma),'YXZ');
+    headQ.setFromEuler(eul); headQ.multiply(q1);
+    headQ.multiply(q0.setFromAxisAngle(zee,-THREE.MathUtils.degToRad(screenAngle())));
+    headQ.premultiply(yawQ.setFromAxisAngle(up,THREE.MathUtils.degToRad(yawOffset)));
+  }else{
+    const phi=THREE.MathUtils.degToRad(90-lat), th=THREE.MathUtils.degToRad(lon);
+    cam.position.set(0,0,0);
+    cam.lookAt(Math.sin(phi)*Math.cos(th),Math.cos(phi),Math.sin(phi)*Math.sin(th));
+    headQ.copy(cam.quaternion);
+  }
+  headPos.copy(NECK).applyQuaternion(headQ).sub(NECK);
+  cam.quaternion.copy(headQ);
+}
+function placeEye(side){ cam.position.copy(headPos).add(tmpV.set(side*IPD/2,0,0).applyQuaternion(headQ)); cam.updateMatrixWorld(); }
+
+let vr=false;
+function startView(){ panel.hidden=true; restartTimer(); resize(); }
+$('vr').addEventListener('click',async()=>{
+  await enableGyro(); vr=true; document.body.classList.add('vr');
+  hint.textContent='素早く下にうなずくと操作メニュー・タップで次へ'; startView();
+});
+$('look').addEventListener('click',()=>{
+  useGyro=false; vr=false; document.body.classList.remove('vr');
+  hint.textContent='ドラッグで見回す・タップで次へ・長押しでメニュー'; startView();
+});
+function openMenu(){ panel.hidden=false; hint.textContent=''; vr=false; document.body.classList.remove('vr'); resize(); }
+
+let downAt=0, moved=false, pressTimer=null;
+R.domElement.addEventListener('pointerdown',e=>{
+  drag={x:e.clientX,y:e.clientY,lon,lat,yaw:yawOffset}; downAt=Date.now(); moved=false;
+  clearTimeout(pressTimer); pressTimer=setTimeout(()=>{ if(drag&&!moved&&panel.hidden){ drag=null; openMenu(); } },600);
+});
+addEventListener('pointermove',e=>{
+  if(!drag) return;
+  const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
+  if(Math.abs(dx)+Math.abs(dy)>8){ moved=true; clearTimeout(pressTimer); }
+  if(useGyro&&ori){ yawOffset=drag.yaw+dx*.2; }
+  else { lon=drag.lon-dx*.15; lat=Math.max(-85,Math.min(85,drag.lat+dy*.15)); }
+});
+addEventListener('pointerup',()=>{
+  clearTimeout(pressTimer);
+  if(drag && !moved && Date.now()-downAt<400 && panel.hidden) next();
+  drag=null;
+});
+addEventListener('contextmenu',e=>e.preventDefault());
+
+function resize(){
+  R.setSize(innerWidth,innerHeight);
+  cam.aspect=vr?(innerWidth/2)/innerHeight:innerWidth/innerHeight;
+  cam.fov=vr?90:75; cam.updateProjectionMatrix();
+}
+addEventListener('resize',resize);
+addEventListener('orientationchange',()=>setTimeout(resize,200));
+
+/* ---------- 視線メニュー ---------- */
+const gaze=(()=>{
+  const group=new THREE.Group(); group.visible=false; scene.add(group);
+  const DIST=1.1, S=.38, DWELL=1300;
+  const NOD_DROP=28, NOD_MS=450, BELOW=16, AWAY_DEG=38, IDLE_MS=4000, COOLDOWN=900;
+  const INTERVALS=[0,10,15,30,60];
+  function makeTex(label,sub,on){
+    const c=document.createElement('canvas'); c.width=256; c.height=256; const g=c.getContext('2d');
+    g.fillStyle=on?'rgba(124,196,232,.95)':'rgba(12,14,18,.82)';
+    g.beginPath(); g.roundRect?g.roundRect(8,8,240,240,36):g.rect(8,8,240,240); g.fill();
+    g.lineWidth=6; g.strokeStyle=on?'#7cc4e8':'rgba(232,235,239,.35)'; g.stroke();
+    g.fillStyle=on?'#0a1218':'#e8ebef'; g.textAlign='center'; g.textBaseline='middle';
+    g.font='600 88px "Hiragino Sans",sans-serif'; g.fillText(label,128,sub?100:128);
+    if(sub){ g.font='600 46px "Hiragino Sans",sans-serif'; g.fillText(sub,128,192); }
+    const t=new THREE.CanvasTexture(c); t.minFilter=THREE.LinearFilter; return t;
+  }
+  const btns=[];
+  function addBtn(x,draw,act){
+    const m=new THREE.Mesh(new THREE.PlaneGeometry(.62*S,.62*S),new THREE.MeshBasicMaterial({transparent:true,depthTest:false}));
+    m.renderOrder=10; m.position.x=x*S; m.userData={draw,act,hover:false};
+    group.add(m); btns.push(m); paint(m);
+  }
+  function paint(m){ const [l,s]=m.userData.draw(); if(m.material.map) m.material.map.dispose(); m.material.map=makeTex(l,s,m.userData.hover); m.material.needsUpdate=true; }
+  addBtn(-1.05,()=>['◀','前へ'],()=>prev());
+  addBtn(-0.35,()=>['▶','次へ'],()=>next());
+  addBtn(0.35,()=>{ const v=+$('interval').value; return ['自動',v?v+'秒':'オフ']; },()=>{
+    const i=INTERVALS.indexOf(+$('interval').value); $('interval').value=String(INTERVALS[(i+1)%INTERVALS.length]); restartTimer();
+  });
+  addBtn(1.05,()=>['✕','終了'],()=>openMenu());
+
+  const capC=document.createElement('canvas'); capC.width=512; capC.height=64;
+  const capT=new THREE.CanvasTexture(capC);
+  const cap=new THREE.Mesh(new THREE.PlaneGeometry(1.6*S,.2*S),new THREE.MeshBasicMaterial({map:capT,transparent:true,depthTest:false}));
+  cap.position.y=.48*S; cap.renderOrder=10; group.add(cap);
+  let capText='';
+  function paintCap(){
+    const t=items.length?(idx+1)+' / '+items.length+'　見つめて選択':'見つめて選択';
+    if(t===capText) return; capText=t;
+    const g=capC.getContext('2d'); g.clearRect(0,0,512,64);
+    g.fillStyle='rgba(232,235,239,.85)'; g.font='600 40px "Hiragino Sans",sans-serif'; g.textAlign='center'; g.textBaseline='middle';
+    g.fillText(t,256,32); capT.needsUpdate=true;
+  }
+  const dot=new THREE.Mesh(new THREE.RingGeometry(.007,.013,24),new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:.8,depthTest:false}));
+  dot.position.z=-.9; dot.renderOrder=20; cam.add(dot);
+  const ring=new THREE.Mesh(new THREE.BufferGeometry(),new THREE.MeshBasicMaterial({color:0x7cc4e8,depthTest:false,side:THREE.DoubleSide}));
+  ring.position.z=-.9; ring.renderOrder=21; cam.add(ring);
+  let ringP=-1;
+  function setRing(p){
+    if(Math.abs(p-ringP)<.01) return; ringP=p; ring.geometry.dispose();
+    ring.geometry=p>0?new THREE.RingGeometry(.018,.027,32,1,Math.PI/2,-p*Math.PI*2):new THREE.BufferGeometry();
+  }
+  const ray=new THREE.Raycaster(); ray.layers.enableAll();
+  const dir=new THREE.Vector3(), center=new THREE.Vector2(0,0), menuDir=new THREE.Vector3();
+  let target=null, since=0, fired=false;
+  const hist=[]; let hiddenAt=-1e9, lastActive=0, fadeV=0;
+  const mats=()=>[...btns.map(b=>b.material),cap.material];
+  function hide(now){ api.visible=false; hiddenAt=now; hist.length=0; if(target){ target.userData.hover=false; paint(target); target=null; } setRing(0); }
+  function showAt(yaw,pitchDeg,now){
+    const p=THREE.MathUtils.degToRad(Math.max(-70,Math.min(20,pitchDeg)));
+    menuDir.set(Math.sin(yaw)*Math.cos(p),Math.sin(p),-Math.cos(yaw)*Math.cos(p));
+    group.position.copy(menuDir).multiplyScalar(DIST).add(headPos); group.lookAt(headPos);
+    api.visible=true; lastActive=now; btns.forEach(paint);
+  }
+  const api={visible:false,update(now){
+    const active=vr&&panel.hidden;
+    if(!active){ if(api.visible) hide(now); fadeV=0; group.visible=false; dot.visible=false; return; }
+    cam.position.copy(headPos); cam.updateMatrixWorld();
+    cam.getWorldDirection(dir);
+    const pitch=THREE.MathUtils.radToDeg(Math.asin(dir.y)), yaw=Math.atan2(dir.x,-dir.z);
+    fadeV+=((api.visible?1:0)-fadeV)*.18; group.visible=fadeV>.02; dot.visible=fadeV>.02;
+    mats().forEach(m=>m.opacity=fadeV); dot.material.opacity=.8*fadeV;
+    if(!api.visible){
+      hist.push({t:now,p:pitch,y:yaw});
+      while(hist.length&&now-hist[0].t>NOD_MS) hist.shift();
+      if(now-hiddenAt<COOLDOWN) return;
+      let top=hist[0]; for(const h of hist) if(h.p>top.p) top=h;
+      if(top&&top.p-pitch>NOD_DROP) showAt(top.y,top.p-BELOW,now);
+      return;
+    }
+    const away=THREE.MathUtils.radToDeg(dir.angleTo(menuDir));
+    if(away<AWAY_DEG-15||target) lastActive=now;
+    if(away>AWAY_DEG||now-lastActive>IDLE_MS){ hide(now); return; }
+    paintCap();
+    ray.setFromCamera(center,cam);
+    const hit=ray.intersectObjects(btns,false)[0], h=hit?hit.object:null;
+    if(h!==target){
+      if(target){ target.userData.hover=false; paint(target); }
+      target=h; since=now; fired=false;
+      if(h){ h.userData.hover=true; paint(h); }
+    }
+    if(!target||fired){ setRing(0); return; }
+    const t=(now-since)/DWELL; setRing(Math.min(1,t));
+    if(t>=1){ fired=true; setRing(0); lastActive=now; target.userData.act(); btns.forEach(paint); }
+  }};
+  return api;
+})();
+
+/* ---------- ループ ---------- */
+let mixCur=0;
+function loop(now){
+  requestAnimationFrame(loop);
+  tickTimer(now); updateHead(); gaze.update(now);
+  /* 奥行きが付く／外れるときはなめらかに */
+  mixCur+=(depthOn-mixCur)*(depthAnim?1:.06); depthAnim=0; uni.mixD.value=mixCur; applyStrength();
+  const W=innerWidth,H=innerHeight;
+  if(vr){
+    R.setScissorTest(true);
+    placeEye(-1); R.setViewport(0,0,W/2,H); R.setScissor(0,0,W/2,H); R.render(scene,cam);
+    placeEye(1);  R.setViewport(W/2,0,W/2,H); R.setScissor(W/2,0,W/2,H); R.render(scene,cam);
+    R.setScissorTest(false);
+  }else{ placeEye(0); R.setViewport(0,0,W,H); R.render(scene,cam); }
+}
+
+const standalone=navigator.standalone===true||matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches;
+if(!standalone&&/iPhone|iPad|iPod/.test(navigator.userAgent)) $('a2hs').hidden=false;
+showSample();
+resize(); requestAnimationFrame(loop);
+restore();
+})();
+</script>
+</body>
+</html>
