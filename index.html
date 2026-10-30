@@ -44,7 +44,7 @@ body.vr #divider{display:block}
 <div id="prog"></div>
 <div id="ui"><div id="panel">
   <h1>Pano Cardboard</h1>
-  <p>360°パノラマ（2:1）を複数追加して切り替えます。追加した画像はこの端末だけに保存され、次に開いたときも残ります。ゴーグル中は<b>下を向くと操作メニュー</b>が出て、ボタンを見つめると選べます（前へ・次へ・自動切替・終了）。手で操作するときはタップで次へ、長押しでこのメニュー。</p>
+  <p>360°パノラマ（2:1）を複数追加して切り替えます。追加した画像はこの端末だけに保存され、次に開いたときも残ります。ゴーグル中は<b>素早く下にうなずくと操作メニュー</b>が出て、ボタンを見つめると選べます（前へ・次へ・自動切替・終了）。手で操作するときはタップで次へ、長押しでこのメニュー。</p>
 
   <div class="row">
     <label class="btn" for="file">画像を追加（複数可）</label>
@@ -243,7 +243,7 @@ let vr=false;
 function startView(){ panel.hidden=true; restartTimer(); resize(); }
 $('vr').addEventListener('click', async ()=>{
   await enableGyro(); vr=true; document.body.classList.add('vr');
-  hint.textContent='下を向くと操作メニュー・タップで次へ'; startView();
+  hint.textContent='素早く下にうなずくと操作メニュー・タップで次へ'; startView();
 });
 $('look').addEventListener('click', ()=>{
   useGyro=false; vr=false; document.body.classList.remove('vr');
@@ -294,7 +294,8 @@ const gaze=(()=>{
   scene.add(cam);
   const both=o=>{ o.layers.enable(1); o.layers.enable(2); return o; };
   const group=new THREE.Group(); group.visible=false; scene.add(group);
-  const DIST=3, PITCH=-50, SHOW_BELOW=-35, HIDE_ABOVE=-18, DWELL=1300;
+  const DIST=3, DWELL=1300;
+  const NOD_DROP=28, NOD_MS=450, BELOW=16, AWAY_DEG=38, IDLE_MS=4000, COOLDOWN=900;
   const INTERVALS=[0,10,15,30,60];
 
   function makeTex(label, sub, on){
@@ -352,19 +353,40 @@ const gaze=(()=>{
   const ray=new THREE.Raycaster(); ray.layers.enableAll();
   const dir=new THREE.Vector3(), center=new THREE.Vector2(0,0);
   let target=null, since=0, fired=false;
+  /* うなずき検出：短時間に大きく下を向いたら出す */
+  const hist=[]; let hiddenAt=-1e9, lastActive=0, fadeV=0;
+  const mats=()=>[...btns.map(b=>b.material), cap.material];
+  const menuDir=new THREE.Vector3();
+  function hide(now){ api.visible=false; hiddenAt=now; hist.length=0;
+    if(target){ target.userData.hover=false; paint(target); target=null; } setRing(0); }
+  function showAt(yaw,pitchDeg,now){
+    const p=THREE.MathUtils.degToRad(Math.max(-70,Math.min(20,pitchDeg)));
+    menuDir.set(Math.sin(yaw)*Math.cos(p), Math.sin(p), -Math.cos(yaw)*Math.cos(p));
+    group.position.copy(menuDir).multiplyScalar(DIST); group.lookAt(0,0,0);
+    api.visible=true; lastActive=now; btns.forEach(paint);
+  }
   const api={visible:false, update(now){
     const active=vr && panel.hidden;
-    dot.visible=active && api.visible;
-    if(!active){ if(api.visible){ api.visible=group.visible=false; } setRing(0); return; }
+    if(!active){ if(api.visible) hide(now); fadeV=0; group.visible=false; dot.visible=false; return; }
     cam.getWorldDirection(dir);
-    const pitch=THREE.MathUtils.radToDeg(Math.asin(dir.y));
-    if(!api.visible && pitch<SHOW_BELOW){
-      const yaw=Math.atan2(dir.x,-dir.z), p=THREE.MathUtils.degToRad(PITCH);
-      group.position.set(Math.sin(yaw)*Math.cos(p)*DIST, Math.sin(p)*DIST, -Math.cos(yaw)*Math.cos(p)*DIST);
-      group.lookAt(0,0,0);
-      api.visible=group.visible=true; btns.forEach(paint);
-    }else if(api.visible && pitch>HIDE_ABOVE){ api.visible=group.visible=false; target=null; setRing(0); return; }
-    if(!api.visible) return;
+    const pitch=THREE.MathUtils.radToDeg(Math.asin(dir.y)), yaw=Math.atan2(dir.x,-dir.z);
+
+    /* フェード */
+    fadeV+=((api.visible?1:0)-fadeV)*.18; group.visible=fadeV>.02; dot.visible=fadeV>.02;
+    mats().forEach(m=>m.opacity=fadeV); dot.material.opacity=.8*fadeV;
+
+    if(!api.visible){
+      hist.push({t:now,p:pitch,y:yaw});
+      while(hist.length && now-hist[0].t>NOD_MS) hist.shift();
+      if(now-hiddenAt<COOLDOWN) return;
+      let top=hist[0]; for(const h of hist) if(h.p>top.p) top=h;
+      if(top && top.p-pitch>NOD_DROP){ showAt(top.y, top.p-BELOW, now); }
+      return;
+    }
+    /* 視線がメニューから大きく外れた／しばらく使わなかったら消す */
+    const away=THREE.MathUtils.radToDeg(dir.angleTo(menuDir));
+    if(away<AWAY_DEG-15 || target) lastActive=now;
+    if(away>AWAY_DEG || now-lastActive>IDLE_MS){ hide(now); return; }
     paintCap();
     ray.setFromCamera(center,cam);
     const hit=ray.intersectObjects(btns,false)[0];
@@ -376,7 +398,7 @@ const gaze=(()=>{
     }
     if(!target||fired){ setRing(0); return; }
     const t=(now-since)/DWELL; setRing(Math.min(1,t));
-    if(t>=1){ fired=true; setRing(0); target.userData.act(); btns.forEach(paint); }
+    if(t>=1){ fired=true; setRing(0); lastActive=now; target.userData.act(); btns.forEach(paint); }
   }};
   return api;
 })();
