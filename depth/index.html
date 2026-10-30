@@ -203,6 +203,15 @@ function sample(){
 }
 
 /* ---------- 奥行き推定（Depth Anything V2 small をブラウザ内で実行） ---------- */
+/* 落ちた対策：推定中の印を残し、次に開いたときに印が残っていれば軽い設定に切り替える */
+function mark(k,v){ try{ v==null?localStorage.removeItem(k):localStorage.setItem(k,v); }catch(e){} }
+function peek(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+let bgOff=peek('depthBgOff')==='1', crashNote='';
+(function(){
+  const was=peek('depthRunning'); mark('depthRunning',null);
+  if(was==='GPU'){ mark('depthCpu','1'); crashNote='前回GPUでの処理中に止まったため、CPUで推定するように切り替えました'; }
+  else if(was==='CPU'){ mark('depthBgOff','1'); bgOff=true; crashNote='前回処理中に止まったため、裏でのまとめて処理をオフにしました（表示中の画像だけ推定します）'; }
+})();
 const Est={
   pipe:null, loading:null, backend:'', T:null,
   /* 速い順に試す：iPhoneのGPU（WebGPU, 半精度）→ GPU（単精度）→ CPU */
@@ -250,7 +259,7 @@ const Est={
   async infer(url){
     for(;;){
       const pipe=await this.load();
-      try{ return await pipe(url); }
+      try{ mark('depthRunning',this.backend); const r=await pipe(url); mark('depthRunning',null); return r; }
       catch(e){
         console.warn('inference failed on',this.backend,e);
         if(this.backend==='GPU'){ try{localStorage.setItem('depthCpu','1')}catch(_){} dstatus.textContent='GPUで推定できなかったため、次に開いたときからCPUで推定します'; }
@@ -283,10 +292,22 @@ const Est={
 let items=[];   // {id,name,src,depthSrc,depthKind:'file'|'est'|null}
 let idx=0;
 const cache=new Map();
+/* メモリ節約：デコード済みの画像は直近3枚分だけ持つ */
 function loadImg(src){
-  if(cache.has(src)) return cache.get(src);
+  if(cache.has(src)){ const p=cache.get(src); cache.delete(src); cache.set(src,p); return p; }
   const p=new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=src; });
-  cache.set(src,p); p.catch(()=>cache.delete(src)); return p;
+  cache.set(src,p); p.catch(()=>cache.delete(src));
+  while(cache.size>3){ const k=cache.keys().next().value; cache.delete(k); }
+  return p;
+}
+/* 推定用の縮小画像だけを作り、元の大きな画像はすぐ手放す */
+function loadSmall(src){
+  return new Promise((res,rej)=>{
+    const im=new Image();
+    im.onload=()=>{ const c=document.createElement('canvas'); c.width=1036; c.height=518;
+      c.getContext('2d').drawImage(im,0,0,1036,518); im.src=''; res(c); };
+    im.onerror=rej; im.src=src;
+  });
 }
 function renderList(){
   listEl.innerHTML='';
@@ -320,7 +341,7 @@ function estimate(it,img,tok){
     if(it.depthSrc) return;
     try{
       const t0=performance.now();
-      const dc=await Est.run(img);
+      const dc=await Est.run(await loadSmall(it.src));
       const blob=await new Promise(r=>dc.toBlob(r,'image/png'));
       it.depthSrc=URL.createObjectURL(blob); it.depthKind='est';
       if(it.id!=null){ const rec=await DB.get(it.id); if(rec){ rec.depth=blob; rec.depthKind='est'; await DB.put(rec); } }
@@ -341,7 +362,8 @@ function queueRest(){
     if(it.depthSrc||restQueued.has(it)) return; restQueued.add(it);
     estQueue=estQueue.then(async()=>{
       if(it.depthSrc||!items.includes(it)) return;
-      try{ await new Promise(r=>setTimeout(r,50)); estimate(it,await loadImg(it.src),0); }catch(e){}
+      if(bgOff) return;
+      await new Promise(r=>setTimeout(r,50)); estimate(it,null,0);
     });
   });
 }
@@ -598,8 +620,9 @@ function loop(now){
 const standalone=navigator.standalone===true||matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches;
 if(!standalone&&/iPhone|iPad|iPod/.test(navigator.userAgent)) $('a2hs').hidden=false;
 showSample();
+if(crashNote) dstatus.textContent=crashNote;
 resize(); requestAnimationFrame(loop);
-restore();
+restore().then(()=>{ if(crashNote) dstatus.textContent=crashNote+'　'+dstatus.textContent; });
 })();
 </script>
 </body>
